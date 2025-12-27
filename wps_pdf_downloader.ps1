@@ -21,6 +21,9 @@ $NameCollisionPolicy   = "Overwrite"
 # Flag: set $true to enable continuous mode, $false to run only once
 $EnableContinuousMode  = $true
 
+# Flag: set $true to save the original webpage HTML source
+$SavePageSource = $true
+
 # Also download these file extensions (edit this list to support more types)
 $AllowedExtensions = @('.pdf', '.zip')
 
@@ -94,6 +97,18 @@ function Invoke-DownloaderRound {
             try { $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 60 } catch {
                 Write-Error ("Failed to fetch page: {0}`n{1}" -f $Url, $_.Exception.Message)
                 return [pscustomobject]@{ ExitCode=2; Ok=0; Fail=0 }
+            }
+        }
+
+        # Archive the original HTML source if enabled
+        if ($Global:SavePageSource -and $resp.Content) {
+            $HtmlPath = Join-Path $OutDir "source.html"
+            try {
+                # Save the HTML content using UTF-8 encoding
+                $resp.Content | Out-File -FilePath $HtmlPath -Encoding utf8
+                Write-Host " [System] Web page source saved to: source.html" -ForegroundColor Cyan
+            } catch {
+                Write-Warning "Failed to save web page source: $($_.Exception.Message)"
             }
         }
 
