@@ -102,11 +102,25 @@ function Invoke-DownloaderRound {
 
         # Archive the original HTML source if enabled
         if ($Global:SavePageSource -and $resp.Content) {
-            $HtmlPath = Join-Path $OutDir "source.html"
+            # Extract Page Title using Regex
+            $TitleMatch = [regex]::Match($resp.Content, '<title>(.*?)</title>', "IgnoreCase")
+            $SafeTitle = "source" # Default fallback
+
+            if ($TitleMatch.Success) {
+                # Clean illegal filename characters (e.g., \ / : * ? " < > |)
+                $SafeTitle = $TitleMatch.Groups[1].Value.Trim()
+                # Use standard string replace for broad compatibility
+                $SafeTitle = $SafeTitle -replace '[\\/:*?"<>|]', '_'
+            }
+
+            # Create a unique filename with timestamp
+            $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+            $HtmlName = "{0}_{1}.html" -f $SafeTitle, $Timestamp
+            $HtmlPath = Join-Path $OutDir $HtmlName
+
             try {
-                # Save the HTML content using UTF-8 encoding
                 $resp.Content | Out-File -FilePath $HtmlPath -Encoding utf8
-                Write-Host " [System] Web page source saved to: source.html" -ForegroundColor Cyan
+                Write-Host " [System] Web page saved to: $HtmlName" -ForegroundColor Cyan
             } catch {
                 Write-Warning "Failed to save web page source: $($_.Exception.Message)"
             }
