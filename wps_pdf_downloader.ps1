@@ -338,12 +338,12 @@ if ($EnableContinuousMode) {
         }
         elseif ($round.ExitCode -eq 0 -and $round.Fail -eq 0) {
             Write-Host ""
-            Write-Host "Round finished with no errors. Starting next round..." -ForegroundColor Yellow
+            Write-Host "Round completed successfully. Starting the next round..." -ForegroundColor Yellow
             continue
         }
         else {
             Write-Host ""
-            Write-Host "Errors detected. Continuous mode stopped." -ForegroundColor DarkYellow
+            Write-Host "Round finished with errors. Please check the log for details." -ForegroundColor DarkYellow
             break
         }
     }
