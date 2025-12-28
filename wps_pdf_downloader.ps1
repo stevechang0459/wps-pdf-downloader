@@ -31,8 +31,25 @@ $AllowedExtensions = @('.pdf', '.zip')
 $MaxDownloadRetries = 3
 
 # --------------------------------------
+# Environment Setup
+# --------------------------------------
+# Ensure terminal correctly renders special symbols like ® and Unicode characters
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+# --------------------------------------
 # Helpers
 # --------------------------------------
+
+function Get-BrowserPath {
+    $candidates = @(
+        "${env:ProgramFiles}\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe",
+        "${env:ProgramFiles}\Google\Chrome\Application\chrome.exe"
+    )
+    foreach ($p in $candidates) { if (Test-Path $p) { return $p } }
+    return $null
+}
+
 function Invoke-DownloaderRound {
     # Returns: [pscustomobject] @{ ExitCode=0|2|3|100; Ok=<int>; Fail=<int> }
     # ExitCode:
@@ -52,7 +69,7 @@ function Invoke-DownloaderRound {
     $FolderName = Read-Host "Output folder name (blank = current folder; absolute path OK)"
     $Root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
-    # Expand environment variables like %USERPROFILE%
+    # Support system environment variables (e.g., %USERPROFILE%\Downloads)
     if (-not [string]::IsNullOrWhiteSpace($FolderName)) {
         $FolderName = [Environment]::ExpandEnvironmentVariables($FolderName)
     }
@@ -91,45 +108,111 @@ function Invoke-DownloaderRound {
         Write-Host "Log File   : $LogFile"
         Write-Host ""
 
-        # Fetch page
-        $resp = $null
-        try { $resp = Invoke-WebRequest -Uri $Url -TimeoutSec 60 } catch {
-            try { $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 60 } catch {
-                Write-Error ("Failed to fetch page: {0}`n{1}" -f $Url, $_.Exception.Message)
-                return [pscustomobject]@{ ExitCode=2; Ok=0; Fail=0 }
-            }
+        # Use browser in Headless mode to render the web page
+        $browser = Get-BrowserPath
+        if (-not $browser) {
+            Write-Error "[Error] Browser not found. Headless rendering aborted."
+            return [pscustomobject]@{ ExitCode=2; Ok=0; Fail=0 }
         }
-        $html = $resp.Content
+
+        # Create temporary user profile for headless browser instance
+        $tmpProfile = Join-Path ([IO.Path]::GetTempPath()) ("headless-localizer-" + [guid]::NewGuid())
+        New-Item -ItemType Directory -Path $tmpProfile -Force | Out-Null
+
+        $html = ""
+        try {
+            Write-Host "[Info] Rendering Web Page via Browser..." -ForegroundColor Cyan
+            $args = "--headless --disable-gpu --no-sandbox --user-data-dir=""$tmpProfile"" --dump-dom ""$Url"""
+            $psi = New-Object System.Diagnostics.ProcessStartInfo -Property @{
+                FileName = $browser; Arguments = $args; RedirectStandardOutput = $true; UseShellExecute = $false; CreateNoWindow = $true
+            }
+            $p = [System.Diagnostics.Process]::Start($psi)
+            $startTime = Get-Date
+
+            # Read rendered HTML output from the browser. ReadToEnd() is
+            # synchronous. For extremely large DOMs (>64KB), if the browser
+            # process blocks, this line might cause a deadlock.
+            $html = $p.StandardOutput.ReadToEnd()
+            # Write-Host -NoNewline $html
+            Write-Host ""
+            Write-Host "[Info] Total Characters : $($html.Length)"
+            Write-Host "[Info] Elapsed Time     : $(((Get-Date) - $startTime).TotalSeconds) seconds"
+            Write-Host ""
+        } finally {
+            # Ensure browser process is terminated and cleanup temp profile
+            if ($null -ne $p -and -not $p.HasExited) { try { $p.Kill() } catch { } }
+            Remove-Item $tmpProfile -Recurse -Force -ErrorAction SilentlyContinue
+        }
 
         # Archive the original HTML source if enabled
         if ($Global:SavePageSource -and $html) {
             # Extract Page Title using Regex
-            $TitleMatch = [regex]::Match($html, '<title>(.*?)</title>', "IgnoreCase")
+            $TitleMatch = [regex]::Match($html, '(?s)<title>(.*?)</title>', "IgnoreCase")
             $SafeTitle = "source" # Default fallback
 
             if ($TitleMatch.Success) {
-                # Clean illegal filename characters (e.g., \ / : * ? " < > |)
-                $SafeTitle = $TitleMatch.Groups[1].Value.Trim()
-                # Use standard string replace for broad compatibility
-                $SafeTitle = $SafeTitle -replace '[\\/:*?"<>|]', '_'
+                # Decode HTML entities (e.g., &reg; -> ®) and trim whitespaces
+                $RawTitle = [System.Net.WebUtility]::HtmlDecode($TitleMatch.Groups[1].Value.Trim())
+                # Replace illegal filename characters with underscores
+                $SafeTitle = $RawTitle -replace '[\\/:*?"<>|]', '_'
             }
 
             # Create a unique filename with timestamp
             $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+
+            # Create resources folder for localizing images
+            $FilesFolder = "${SafeTitle}_${Timestamp}_files"
+            $FilesPath = Join-Path $OutDir $FilesFolder
+            if (-not (Test-Path $FilesPath)) { New-Item $FilesPath -ItemType Directory -Force | Out-Null }
+
+            Write-Host "[Info] Localizing images into: $FilesFolder" -ForegroundColor Cyan
+            Write-Host ""
+            $imgMatches = [regex]::Matches($html, '<img\s+[^>]*src="([^"]+)"')
+            $BaseUri = [System.Uri]$Url
+            $imgCount = 0
+
+            foreach ($match in $imgMatches) {
+                $rawSrc = $match.Groups[1].Value
+                try {
+                    $absImgUrl = [System.Uri]::new($BaseUri, $rawSrc).AbsoluteUri
+                    $imgName = [IO.Path]::GetFileName(($absImgUrl -split '\?')[0])
+                    if (-not $imgName) { $imgName = "image_$imgCount.png" }
+
+                    $localImgPath = Join-Path $FilesPath $imgName
+                    $relativeImgPath = "./$FilesFolder/$imgName"
+
+                    Write-Host ("[Info] Downloading image[{0}]: {1}" -f $imgCount, $absImgUrl) # -ForegroundColor DarkGray
+
+                    if (Invoke-DownloadWithRetry -Url $absImgUrl -Dest $localImgPath -MaxRetries $Global:MaxDownloadRetries) {
+                        # Replace remote URL with local relative path in HTML
+                        $html = $html.Replace($rawSrc, $relativeImgPath)
+                        $imgCount++
+                    }
+                } catch {}
+            }
+            Write-Host ""
+            Write-Host ("[Info] Found {0} image(s)." -f $imgCount) -ForegroundColor Green
+            Write-Host ""
+
             $HtmlName = "{0}_{1}.html" -f $SafeTitle, $Timestamp
             $HtmlPath = Join-Path $OutDir $HtmlName
 
             try {
+                # Save the localized HTML source using UTF8 encoding
                 $html | Out-File -FilePath $HtmlPath -Encoding utf8
-                Write-Host " [System] Web page saved to: $HtmlName" -ForegroundColor Cyan
+                Write-Host "[Info] Web page saved to: $HtmlName" # -ForegroundColor Cyan
             } catch {
                 Write-Warning "Failed to save web page source: $($_.Exception.Message)"
             }
         }
 
-        # Extract links
+        # --- Extract links (Hybrid Method) ---
         $hrefs = @()
-        if ($resp.Links) { $hrefs += ($resp.Links | ForEach-Object { $_.href }) }
+        # Source A: From Static fetch (Invoke-WebRequest) links object
+        if ($null -ne $resp -and $resp.Links) {
+            $hrefs += ($resp.Links | ForEach-Object { $_.href })
+        }
+        # Source B: From Dynamic render (Headless Browser) raw HTML via Regex
         if ($html) {
             $hrefMatches = Select-String -InputObject $html -Pattern 'href="([^"]+)"' -AllMatches
             if ($hrefMatches) { $hrefs += ($hrefMatches.Matches | ForEach-Object { $_.Groups[1].Value }) }
@@ -165,12 +248,14 @@ function Invoke-DownloaderRound {
             return [pscustomobject]@{ ExitCode=3; Ok=0; Fail=0 }
         }
 
-        # Show counts by type
+        # Show download counts categorized by extension
         $pdfCount = ($urls | Where-Object { [IO.Path]::GetExtension(($_ -split '\?')[0]).ToLowerInvariant() -eq '.pdf' }).Count
         $zipCount = ($urls | Where-Object { [IO.Path]::GetExtension(($_ -split '\?')[0]).ToLowerInvariant() -eq '.zip' }).Count
-        Write-Host ("Found {0} link(s): PDF={1}, ZIP={2}" -f $urls.Count, $pdfCount, $zipCount) -ForegroundColor Green
+        Write-Host ""
+        Write-Host ("[Info] Found {0} link(s). PDF={1} ZIP={2}" -f $urls.Count, $pdfCount, $zipCount) -ForegroundColor Green
+        Write-Host ""
 
-        # Download all matched files (.pdf/.zip)
+        # Download all matched files with collision handling
         $i=0; $ok=0; $fail=0
         foreach ($u in $urls) {
             $i++
@@ -214,6 +299,7 @@ function Invoke-DownloaderRound {
         return [pscustomobject]@{ ExitCode=0; Ok=$ok; Fail=$fail }
     }
     finally {
+        # Finalize transcript log
         if ($TranscriptStarted) {
             try {
                 Stop-Transcript | Out-Null
@@ -364,7 +450,7 @@ if ($EnableContinuousMode) {
     while ($true) {
         $round = Invoke-DownloaderRound
         if ($round.ExitCode -eq 100) {
-            break   # user aborted with blank URL
+            break   # User input blank URL to stop
         }
         elseif ($round.ExitCode -eq 0 -and $round.Fail -eq 0) {
             Write-Host ""

@@ -7,7 +7,9 @@
 
 A lightweight **Windows PowerShell** utility that batch-downloads **all PDF and ZIP links** discovered on a web page.
 
-![image](https://hackmd.io/_uploads/HywPRqpm-l.png)
+![Screenshot 2025-12-28 220242](https://hackmd.io/_uploads/B101tnCXWg.png)
+
+![Screenshot 2025-12-28 220310](https://hackmd.io/_uploads/r1ckK207-l.png)
 
 ## 🚀 Quick Start
 

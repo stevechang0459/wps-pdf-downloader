@@ -1,7 +1,7 @@
 :: SPDX-License-Identifier: MIT
 :: Copyright (c) 2025 Steve Chang
 
-REM run_pdf_downloader.bat
+@REM run_pdf_downloader.bat
 
 @echo off
 REM Run a PowerShell script next to this BAT with one-time ExecutionPolicy Bypass.
