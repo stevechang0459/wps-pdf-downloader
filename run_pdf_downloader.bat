@@ -21,7 +21,7 @@ REM Prefer PowerShell 7 (pwsh), fallback to Windows PowerShell
 where pwsh >nul 2>nul
 if %ERRORLEVEL%==0 (
   pwsh -NoProfile -Command "Unblock-File -LiteralPath '%~dp0%PS1%' ; exit 0" >nul 2>nul
-  pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0%PS1%"
+  pwsh -NoProfile -ExecutionPolicy Bypass -File "%~dp0%PS1%" %*
   set "RC=%ERRORLEVEL%"
   goto :report
 )
@@ -29,7 +29,7 @@ if %ERRORLEVEL%==0 (
 where powershell >nul 2>nul
 if %ERRORLEVEL%==0 (
   powershell -NoProfile -Command "Unblock-File -LiteralPath '%~dp0%PS1%' ; exit 0" >nul 2>nul
-  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0%PS1%"
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0%PS1%" %*
   set "RC=%ERRORLEVEL%"
   goto :report
 )

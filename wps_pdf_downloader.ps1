@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2025 Steve Chang
 
+param(
+    [Parameter(Mandatory=$false)][Alias("u")][string]$UrlParam,
+    [Parameter(Mandatory=$false)][Alias("o")][string]$OutDirParam,
+    [Parameter(Mandatory=$false)][Alias("m")][ValidateSet("B", "S")][string]$ModeParam = "B",
+    [Parameter(Mandatory=$false)][Alias("i")][switch]$InteractiveMode,
+    [Parameter(Mandatory=$false)][Alias("c")][switch]$ContinuousMode
+)
+
 # wps_pdf_downloader.ps1
 # Double-click (Run with PowerShell) → prompts for URL and output folder.
 # Rules:
@@ -16,10 +24,16 @@
 # Settings
 # --------------------------------------
 # File name collision policy: Overwrite | Rename | Skip
-$NameCollisionPolicy   = "Overwrite"
+$NameCollisionPolicy = "Overwrite"
 
 # Flag: set $true to enable continuous mode, $false to run only once
-$EnableContinuousMode  = $true
+$EnableContinuousMode = if ($ContinuousMode) { $true } else { $false }
+
+# If -c is used, we also force InteractiveMode to true
+if ($ContinuousMode) {
+    $InteractiveMode = $true
+    Write-Host " [Info] Continuous Mode (-c) detected: Forcing Interactive Mode ON." -ForegroundColor Yellow
+}
 
 # Flag: set $true to save the original webpage HTML source
 $SavePageSource = $true
@@ -58,15 +72,37 @@ function Invoke-DownloaderRound {
     #   3   = fatal: no matching links found (.pdf/.zip)
     #   100 = user aborted (blank URL)
 
-    # Prompt URL
-    $Url = Read-Host "Page URL (required; leave blank to exit)"
+    # 1. Handle URL
+    $Url = if ($InteractiveMode) {
+        Read-Host "Page URL (required; leave blank to exit)"
+    } else { $UrlParam }
     if ([string]::IsNullOrWhiteSpace($Url)) {
         Write-Warning "No URL provided. Exiting."
         return [pscustomobject]@{ ExitCode=100; Ok=0; Fail=0 }
     }
 
-    # Prompt output folder
-    $FolderName = Read-Host "Output folder name (blank = current folder; absolute path OK)"
+    # 2. Handle Fetch Method (B=Browser, S=Static)
+    $UseBrowser = $true
+    $Mode = if ($InteractiveMode) {
+        $input = Read-Host "Fetch Method? [B]rowser or [S]tatic"
+        if ([string]::IsNullOrWhiteSpace($input)) { "" } else { $input.ToUpper() }
+    } else {
+        if ([string]::IsNullOrWhiteSpace($ModeParam)) { "" } else { $ModeParam.ToUpper() }
+    }
+
+    # Strict Validation: Terminate if input is neither B nor S
+    if ($Mode -notin @("B", "S")) {
+        Write-Error "[Error] Invalid Fetch Method: '$Mode'. Only 'B' or 'S' are allowed."
+        return [pscustomobject]@{ ExitCode=100; Ok=0; Fail=0 }
+    }
+
+    if ($Mode -eq "S") { $UseBrowser = $false }
+
+    # 3. Handle Output Directory
+    $FolderName = if ($InteractiveMode) {
+        Read-Host "Output folder name (blank = current folder; absolute path OK)"
+    } else { $OutDirParam }
+
     $Root = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 
     # Support system environment variables (e.g., %USERPROFILE%\Downloads)
@@ -108,40 +144,58 @@ function Invoke-DownloaderRound {
         Write-Host "Log File   : $LogFile"
         Write-Host ""
 
-        # Use browser in Headless mode to render the web page
-        $browser = Get-BrowserPath
-        if (-not $browser) {
-            Write-Error "[Error] Browser not found. Headless rendering aborted."
-            return [pscustomobject]@{ ExitCode=2; Ok=0; Fail=0 }
+        $html = ""
+
+        if ($UseBrowser) {
+            # --- Option A: Browser Rendering ---
+            # Use browser in Headless mode to render the web page
+            $browser = Get-BrowserPath
+            if (-not $browser) {
+                # Write-Error "[Error] Browser not found. Headless rendering aborted."
+                # return [pscustomobject]@{ ExitCode=2; Ok=0; Fail=0 }
+                Write-Error "[Error] Browser not found. Falling back to Static Fetch."
+                $UseBrowser = $false # Fallback if browser is missing
+            } else {
+                # Create temporary user profile for headless browser instance
+                $tmpProfile = Join-Path ([IO.Path]::GetTempPath()) ("headless-localizer-" + [guid]::NewGuid())
+                New-Item -ItemType Directory -Path $tmpProfile -Force | Out-Null
+
+                try {
+                    Write-Host "[Info] Rendering Web Page via Browser..." -ForegroundColor Yellow
+                    $args = "--headless --disable-gpu --no-sandbox --user-data-dir=""$tmpProfile"" --dump-dom ""$Url"""
+                    $psi = New-Object System.Diagnostics.ProcessStartInfo -Property @{
+                        FileName = $browser; Arguments = $args; RedirectStandardOutput = $true; UseShellExecute = $false; CreateNoWindow = $true
+                    }
+                    $p = [System.Diagnostics.Process]::Start($psi)
+                    $startTime = Get-Date
+
+                    # Read rendered HTML output from the browser. ReadToEnd() is
+                    # synchronous. For extremely large DOMs (>64KB), if the browser
+                    # process blocks, this line might cause a deadlock.
+                    $html = $p.StandardOutput.ReadToEnd()
+                    # Write-Host -NoNewline $html
+                    Write-Host ""
+                    Write-Host "[Info] Total Characters : $($html.Length)"
+                    Write-Host "[Info] Elapsed Time     : $(((Get-Date) - $startTime).TotalSeconds) seconds"
+                    Write-Host ""
+                } finally {
+                    # Ensure browser process is terminated and cleanup temp profile
+                    if ($null -ne $p -and -not $p.HasExited) { try { $p.Kill() } catch { } }
+                    Remove-Item $tmpProfile -Recurse -Force -ErrorAction SilentlyContinue
+                }
+            }
         }
 
-        # Create temporary user profile for headless browser instance
-        $tmpProfile = Join-Path ([IO.Path]::GetTempPath()) ("headless-localizer-" + [guid]::NewGuid())
-        New-Item -ItemType Directory -Path $tmpProfile -Force | Out-Null
-
-        $html = ""
-        try {
-            Write-Host "[Info] Rendering Web Page via Browser..." -ForegroundColor Cyan
-            $args = "--headless --disable-gpu --no-sandbox --user-data-dir=""$tmpProfile"" --dump-dom ""$Url"""
-            $psi = New-Object System.Diagnostics.ProcessStartInfo -Property @{
-                FileName = $browser; Arguments = $args; RedirectStandardOutput = $true; UseShellExecute = $false; CreateNoWindow = $true
+        if (-not $UseBrowser) {
+            # --- Option B: Static Fetch (Invoke-WebRequest) ---
+            try {
+                Write-Host "[Info] Fetching Page via Invoke-WebRequest..." -ForegroundColor Yellow
+                $resp = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 60
+                $html = $resp.Content
+            } catch {
+                Write-Error ("Failed to fetch page: {0}`n{1}" -f $Url, $_.Exception.Message)
+                return [pscustomobject]@{ ExitCode=2; Ok=0; Fail=0 }
             }
-            $p = [System.Diagnostics.Process]::Start($psi)
-            $startTime = Get-Date
-
-            # Read rendered HTML output from the browser. ReadToEnd() is
-            # synchronous. For extremely large DOMs (>64KB), if the browser
-            # process blocks, this line might cause a deadlock.
-            $html = $p.StandardOutput.ReadToEnd()
-            # Write-Host -NoNewline $html
-            Write-Host ""
-            Write-Host "[Info] Total Characters : $($html.Length)"
-            Write-Host "[Info] Elapsed Time     : $(((Get-Date) - $startTime).TotalSeconds) seconds"
-            Write-Host ""
-        } finally {
-            # Ensure browser process is terminated and cleanup temp profile
-            if ($null -ne $p -and -not $p.HasExited) { try { $p.Kill() } catch { } }
-            Remove-Item $tmpProfile -Recurse -Force -ErrorAction SilentlyContinue
         }
 
         # Archive the original HTML source if enabled
