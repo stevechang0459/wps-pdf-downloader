@@ -99,11 +99,12 @@ function Invoke-DownloaderRound {
                 return [pscustomobject]@{ ExitCode=2; Ok=0; Fail=0 }
             }
         }
+        $html = $resp.Content
 
         # Archive the original HTML source if enabled
-        if ($Global:SavePageSource -and $resp.Content) {
+        if ($Global:SavePageSource -and $html) {
             # Extract Page Title using Regex
-            $TitleMatch = [regex]::Match($resp.Content, '<title>(.*?)</title>', "IgnoreCase")
+            $TitleMatch = [regex]::Match($html, '<title>(.*?)</title>', "IgnoreCase")
             $SafeTitle = "source" # Default fallback
 
             if ($TitleMatch.Success) {
@@ -119,7 +120,7 @@ function Invoke-DownloaderRound {
             $HtmlPath = Join-Path $OutDir $HtmlName
 
             try {
-                $resp.Content | Out-File -FilePath $HtmlPath -Encoding utf8
+                $html | Out-File -FilePath $HtmlPath -Encoding utf8
                 Write-Host " [System] Web page saved to: $HtmlName" -ForegroundColor Cyan
             } catch {
                 Write-Warning "Failed to save web page source: $($_.Exception.Message)"
@@ -129,8 +130,8 @@ function Invoke-DownloaderRound {
         # Extract links
         $hrefs = @()
         if ($resp.Links) { $hrefs += ($resp.Links | ForEach-Object { $_.href }) }
-        if ($resp.Content) {
-            $hrefMatches = Select-String -InputObject $resp.Content -Pattern 'href="([^"]+)"' -AllMatches
+        if ($html) {
+            $hrefMatches = Select-String -InputObject $html -Pattern 'href="([^"]+)"' -AllMatches
             if ($hrefMatches) { $hrefs += ($hrefMatches.Matches | ForEach-Object { $_.Groups[1].Value }) }
         }
 
